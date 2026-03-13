@@ -3,7 +3,8 @@
 Bitcoin Metrics Alert Bot
 =========================
 Obtiene métricas on-chain de Bitcoin (Puell Multiple y MVRV Z-Score)
-usando la API pública de CoinMetrics y envía alertas por email.
+usando la API pública de CoinMetrics (Puell) y CoinGecko (MVRV Z-Score)
+y envía alertas por email.
 
 Fuentes de referencia:
   - Puell Multiple : https://www.bitcoinmagazinepro.com/es/charts/puell-multiple/
@@ -46,6 +47,9 @@ log = logging.getLogger(__name__)
 # CoinMetrics Community API (gratuita, sin clave)
 COINMETRICS_URL = "https://community-api.coinmetrics.io/v4/timeseries/asset-metrics"
 
+# CoinGecko API (gratuita, sin clave)
+COINGECKO_URL = "https://api.coingecko.com/api/v3"
+
 # Zonas de señal con descripción y color HTML
 ZONES = {
     "puell": [
@@ -77,7 +81,7 @@ def _zone_info(value: float, metric: str) -> dict:
 # Obtención de datos — CoinMetrics Community API
 # ---------------------------------------------------------------------------
 
-def _fetch_metrics(metrics: list[str], days: int) -> pd.DataFrame:
+def _fetch_metrics(metrics: list, days: int) -> pd.DataFrame:
     """Descarga métricas de CoinMetrics para BTC."""
     end   = datetime.utcnow()
     start = end - timedelta(days=days)
@@ -108,9 +112,6 @@ def _fetch_metrics(metrics: list[str], days: int) -> pd.DataFrame:
 def get_puell_multiple() -> dict:
     """
     Puell Multiple = Issuance diaria USD / Media móvil 365d de Issuance USD
-
-    IssTotUSD: valor total en USD de las monedas emitidas ese día.
-    Se necesitan ~400 días para calcular la MA-365 con margen.
     """
     df = _fetch_metrics(["IssTotUSD"], days=400)
     df.dropna(subset=["IssTotUSD"], inplace=True)
@@ -133,31 +134,67 @@ def get_puell_multiple() -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# Obtención de datos — CoinGecko (MVRV Z-Score aproximado)
+# ---------------------------------------------------------------------------
+
 def get_mvrv_zscore() -> dict:
     """
-    MVRV Z-Score = (Market Cap − Realized Cap) / σ(Market Cap − Realized Cap)
+    MVRV Z-Score aproximado usando datos de CoinGecko (gratuito, sin API key).
 
-    Se utilizan todos los datos históricos disponibles para σ (~10 años).
-    CapMrktCurUSD : Market Cap actual
-    CapRealUSD    : Realized Cap (precio al que cada moneda fue movida por última vez)
+    Usamos los últimos 90 días (límite gratuito sin registro).
+    El Realized Cap se aproxima con la media móvil del market cap.
+    El Z-Score se normaliza con la desviación estándar del período.
+
+    Nota: Es una aproximación de corto plazo, útil como señal direccional.
     """
-    df = _fetch_metrics(["CapMrktCurUSD", "CapRealUSD"], days=4000)
-    df.dropna(subset=["CapMrktCurUSD", "CapRealUSD"], inplace=True)
+    log.info("Descargando datos históricos de CoinGecko para MVRV Z-Score...")
 
-    df["diff"]   = df["CapMrktCurUSD"] - df["CapRealUSD"]
-    std_dev      = float(df["diff"].std())
-    latest       = df.iloc[-1]
-    z_score      = float(latest["diff"] / std_dev) if std_dev else 0.0
-    mvrv_ratio   = float(latest["CapMrktCurUSD"] / latest["CapRealUSD"])
-    date_str     = latest.name.strftime("%d/%m/%Y")
+    # CoinGecko permite hasta 90 días sin API key en el endpoint /market_chart
+    url = f"{COINGECKO_URL}/coins/bitcoin/market_chart"
+    params = {
+        "vs_currency": "usd",
+        "days": "90",
+        "interval": "daily",
+    }
+    resp = requests.get(url, params=params, timeout=30)
+    resp.raise_for_status()
+    data = resp.json()
+
+    # Construimos DataFrame con precios y market caps
+    prices      = pd.DataFrame(data["prices"],      columns=["timestamp", "price"])
+    market_caps = pd.DataFrame(data["market_caps"], columns=["timestamp", "market_cap"])
+
+    prices["date"]      = pd.to_datetime(prices["timestamp"],      unit="ms")
+    market_caps["date"] = pd.to_datetime(market_caps["timestamp"], unit="ms")
+
+    df = prices[["date", "price"]].merge(market_caps[["date", "market_cap"]], on="date")
+    df.set_index("date", inplace=True)
+    df.sort_index(inplace=True)
+    df.dropna(inplace=True)
+
+    # Realized Cap aproximado = media móvil 30 días del market cap
+    df["realized_cap"] = df["market_cap"].rolling(30, min_periods=10).mean()
+    df.dropna(subset=["realized_cap"], inplace=True)
+
+    # Diferencia entre Market Cap y Realized Cap
+    df["diff"] = df["market_cap"] - df["realized_cap"]
+
+    # Z-Score = diff / desviación estándar del período
+    std_dev = float(df["diff"].std())
+    latest  = df.iloc[-1]
+
+    z_score    = float(latest["diff"] / std_dev) if std_dev else 0.0
+    mvrv_ratio = float(latest["market_cap"] / latest["realized_cap"])
+    date_str   = latest.name.strftime("%d/%m/%Y")
 
     return {
-        "value":       z_score,
-        "mvrv_ratio":  mvrv_ratio,
-        "market_cap":  float(latest["CapMrktCurUSD"]),
-        "realized_cap":float(latest["CapRealUSD"]),
-        "date":        date_str,
-        "zone":        _zone_info(z_score, "mvrv"),
+        "value":        z_score,
+        "mvrv_ratio":   mvrv_ratio,
+        "market_cap":   float(latest["market_cap"]),
+        "realized_cap": float(latest["realized_cap"]),
+        "date":         date_str,
+        "zone":         _zone_info(z_score, "mvrv"),
     }
 
 
@@ -222,7 +259,7 @@ def _fmt_usd(value: float) -> str:
     return f"${value:,.0f}"
 
 
-def build_email(puell: dict, mvrv: dict, signal_info: dict) -> tuple[str, str]:
+def build_email(puell: dict, mvrv: dict, signal_info: dict) -> tuple:
     """Devuelve (asunto, cuerpo HTML) del email."""
     now      = datetime.now().strftime("%d/%m/%Y %H:%M")
     subject  = (
@@ -274,9 +311,10 @@ def build_email(puell: dict, mvrv: dict, signal_info: dict) -> tuple[str, str]:
         mvrv["zone"],
         [
             ("Market Cap", _fmt_usd(mvrv["market_cap"])),
-            ("Realized Cap", _fmt_usd(mvrv["realized_cap"])),
+            ("Realized Cap (aprox.)", _fmt_usd(mvrv["realized_cap"])),
             ("Ratio MVRV", f"{mvrv['mvrv_ratio']:.2f}x"),
             ("Dato de", mvrv["date"]),
+            ("Fuente", "CoinGecko (aproximación)"),
         ],
         "https://www.bitcoinmagazinepro.com/es/charts/mvrv-zscore/",
     )
@@ -338,9 +376,9 @@ def build_email(puell: dict, mvrv: dict, signal_info: dict) -> tuple[str, str]:
   <div style="background:#1a2f5a;border-radius:0 0 12px 12px;
               padding:16px 24px;text-align:center;">
     <div style="font-size:11px;color:#7a8faa;line-height:1.7">
-      Datos: <a href="https://coinmetrics.io" style="color:#c9a84c;">CoinMetrics</a> ·
-      Fuente de referencia:
-      <a href="https://www.bitcoinmagazinepro.com/es/charts/puell-multiple/"
+      Datos: <a href="https://coinmetrics.io" style="color:#c9a84c;">CoinMetrics</a> (Puell) ·
+      <a href="https://coingecko.com" style="color:#c9a84c;">CoinGecko</a> (MVRV aprox.) ·
+      Referencia: <a href="https://www.bitcoinmagazinepro.com/es/charts/puell-multiple/"
          style="color:#c9a84c;">Bitcoin Magazine Pro</a><br>
       Este análisis es meramente informativo. No constituye asesoramiento financiero.
     </div>
