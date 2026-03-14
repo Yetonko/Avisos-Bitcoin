@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """
-Bitcoin Metrics Alert Bot
-=========================
-Obtiene métricas on-chain de Bitcoin (Puell Multiple y MVRV Z-Score)
-usando la API pública de CoinMetrics (Puell) y CoinGecko (MVRV Z-Score)
-y envía alertas por email.
+Bitcoin Metrics Alert Bot — v2
+==============================
+Métricas on-chain y de derivados para identificar oportunidades de compra/venta.
 
-Fuentes de referencia:
-  - Puell Multiple : https://www.bitcoinmagazinepro.com/es/charts/puell-multiple/
-  - MVRV Z-Score   : https://www.bitcoinmagazinepro.com/es/charts/mvrv-zscore/
+Fuentes:
+  - Puell Multiple  : CoinMetrics Community API (gratuita, sin clave)
+  - Resto            : charts.bgeometrics.com (JSONs públicos, sin clave)
 
 Uso:
   python bitcoin_alerts.py           # ejecutar una vez
@@ -31,10 +29,6 @@ import pandas as pd
 import schedule
 from dotenv import load_dotenv
 
-# ---------------------------------------------------------------------------
-# Configuración
-# ---------------------------------------------------------------------------
-
 load_dotenv()
 
 logging.basicConfig(
@@ -44,33 +38,75 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# CoinMetrics Community API (gratuita, sin clave)
-COINMETRICS_URL = "https://community-api.coinmetrics.io/v4/timeseries/asset-metrics"
+# ---------------------------------------------------------------------------
+# URLs
+# ---------------------------------------------------------------------------
 
-# CoinGecko API (gratuita, sin clave)
-COINGECKO_URL = "https://api.coingecko.com/api/v3"
+COINMETRICS_URL  = "https://community-api.coinmetrics.io/v4/timeseries/asset-metrics"
+BGEOMETRICS_BASE = "https://charts.bgeometrics.com/files"
 
-# Zonas de señal con descripción y color HTML
+# ---------------------------------------------------------------------------
+# Zonas de señal
+# ---------------------------------------------------------------------------
+
 ZONES = {
     "puell": [
-        (0.00, 0.50, "COMPRA FUERTE",  "#1a6e3f", "💚"),
-        (0.50, 1.00, "Acumulación",    "#2e7d32", "🟢"),
-        (1.00, 2.00, "Neutral",        "#616161", "⚪"),
-        (2.00, 4.00, "Precaución",     "#e65100", "🟠"),
-        (4.00, 999,  "VENTA FUERTE",   "#b71c1c", "🔴"),
+        (0.00, 0.50, "COMPRA FUERTE",   "#1a6e3f", "💚"),
+        (0.50, 1.00, "Acumulación",     "#2e7d32", "🟢"),
+        (1.00, 2.00, "Neutral",         "#616161", "⚪"),
+        (2.00, 4.00, "Precaución",      "#e65100", "🟠"),
+        (4.00, 999,  "VENTA FUERTE",    "#b71c1c", "🔴"),
     ],
     "mvrv": [
-        (-999,  0.0, "COMPRA FUERTE",  "#1a6e3f", "💚"),
-        (0.0,   2.0, "Neutral-Alcista","#2e7d32", "🟢"),
-        (2.0,   5.0, "Precaución",     "#e65100", "🟠"),
-        (5.0,   7.0, "Zona de Venta",  "#c62828", "🔴"),
-        (7.0,   999, "VENTA FUERTE",   "#b71c1c", "🔴"),
+        (-999,  0.0, "COMPRA FUERTE",   "#1a6e3f", "💚"),
+        (0.0,   2.0, "Acumulación",     "#2e7d32", "🟢"),
+        (2.0,   5.0, "Precaución",      "#e65100", "🟠"),
+        (5.0,   7.0, "Zona de Venta",   "#c62828", "🔴"),
+        (7.0,   999, "VENTA FUERTE",    "#b71c1c", "🔴"),
     ],
+    "nupl": [
+        (-999,  0.00, "COMPRA FUERTE",  "#1a6e3f", "💚"),  # Capitulación
+        (0.00,  0.25, "Acumulación",    "#2e7d32", "🟢"),  # Esperanza/Miedo
+        (0.25,  0.50, "Neutral",        "#616161", "⚪"),  # Optimismo
+        (0.50,  0.75, "Precaución",     "#e65100", "🟠"),  # Creencia
+        (0.75,  999,  "VENTA FUERTE",   "#b71c1c", "🔴"),  # Euforia
+    ],
+    "sopr": [
+        (-999,  0.970, "COMPRA FUERTE", "#1a6e3f", "💚"),  # Capitulación fuerte
+        (0.970, 1.000, "Acumulación",   "#2e7d32", "🟢"),  # Vendiendo a pérdidas
+        (1.000, 1.020, "Neutral",       "#616161", "⚪"),
+        (1.020, 1.060, "Precaución",    "#e65100", "🟠"),
+        (1.060, 999,   "VENTA FUERTE",  "#b71c1c", "🔴"),  # Todo el mundo en ganancias
+    ],
+    "funding": [
+        (-999,    -0.005, "COMPRA FUERTE", "#1a6e3f", "💚"),  # Miedo extremo en derivados
+        (-0.005,   0.000, "Acumulación",   "#2e7d32", "🟢"),  # Ligeramente negativo
+        (0.000,    0.020, "Neutral",       "#616161", "⚪"),
+        (0.020,    0.050, "Precaución",    "#e65100", "🟠"),
+        (0.050,    999,   "VENTA FUERTE",  "#b71c1c", "🔴"),  # Codicia extrema
+    ],
+    "supply": [
+        (-999,  50.0, "COMPRA FUERTE",  "#1a6e3f", "💚"),  # Mayoría en pérdidas
+        (50.0,  65.0, "Acumulación",    "#2e7d32", "🟢"),
+        (65.0,  80.0, "Neutral",        "#616161", "⚪"),
+        (80.0,  90.0, "Precaución",     "#e65100", "🟠"),
+        (90.0,  999,  "VENTA FUERTE",   "#b71c1c", "🔴"),  # Casi todos en ganancias
+    ],
+}
+
+# Puntuación por zona para el score compuesto
+ZONE_SCORE = {
+    "COMPRA FUERTE":   2,
+    "Acumulación":     1,
+    "Neutral-Alcista": 1,
+    "Neutral":         0,
+    "Precaución":     -1,
+    "Zona de Venta":  -1,
+    "VENTA FUERTE":   -2,
 }
 
 
 def _zone_info(value: float, metric: str) -> dict:
-    """Devuelve descripción, color y emoji para el valor según el indicador."""
     for low, high, label, color, emoji in ZONES[metric]:
         if low <= value < high:
             return {"label": label, "color": color, "emoji": emoji}
@@ -78,27 +114,26 @@ def _zone_info(value: float, metric: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Obtención de datos — CoinMetrics Community API
+# Obtención de datos — CoinMetrics (Puell Multiple)
 # ---------------------------------------------------------------------------
 
-def _fetch_metrics(metrics: list, days: int) -> pd.DataFrame:
-    """Descarga métricas de CoinMetrics para BTC."""
+def _fetch_coinmetrics(metrics: list, days: int) -> pd.DataFrame:
     end   = datetime.utcnow()
     start = end - timedelta(days=days)
     params = {
-        "assets":      "btc",
-        "metrics":     ",".join(metrics),
-        "start_time":  start.strftime("%Y-%m-%dT00:00:00Z"),
-        "end_time":    end.strftime("%Y-%m-%dT23:59:59Z"),
-        "frequency":   "1d",
-        "page_size":   days + 10,
+        "assets":     "btc",
+        "metrics":    ",".join(metrics),
+        "start_time": start.strftime("%Y-%m-%dT00:00:00Z"),
+        "end_time":   end.strftime("%Y-%m-%dT23:59:59Z"),
+        "frequency":  "1d",
+        "page_size":  days + 10,
     }
-    log.info("Descargando métricas: %s", metrics)
+    log.info("CoinMetrics: descargando %s", metrics)
     resp = requests.get(COINMETRICS_URL, params=params, timeout=30)
     resp.raise_for_status()
     data = resp.json().get("data", [])
     if not data:
-        raise ValueError("La API no devolvió datos.")
+        raise ValueError("CoinMetrics no devolvió datos.")
     df = pd.DataFrame(data)
     df["time"] = pd.to_datetime(df["time"])
     df.set_index("time", inplace=True)
@@ -110,20 +145,16 @@ def _fetch_metrics(metrics: list, days: int) -> pd.DataFrame:
 
 
 def get_puell_multiple() -> dict:
-    """
-    Puell Multiple = Issuance diaria USD / Media móvil 365d de Issuance USD
-    """
-    df = _fetch_metrics(["IssTotUSD"], days=400)
+    df = _fetch_coinmetrics(["IssTotUSD"], days=400)
     df.dropna(subset=["IssTotUSD"], inplace=True)
-
     df["MA365"] = df["IssTotUSD"].rolling(365, min_periods=200).mean()
     df.dropna(subset=["MA365"], inplace=True)
 
-    latest     = df.iloc[-1]
-    puell      = float(latest["IssTotUSD"] / latest["MA365"])
-    issuance   = float(latest["IssTotUSD"])
-    ma365      = float(latest["MA365"])
-    date_str   = latest.name.strftime("%d/%m/%Y")
+    latest   = df.iloc[-1]
+    puell    = float(latest["IssTotUSD"] / latest["MA365"])
+    issuance = float(latest["IssTotUSD"])
+    ma365    = float(latest["MA365"])
+    date_str = latest.name.strftime("%d/%m/%Y")
 
     return {
         "value":    puell,
@@ -135,114 +166,170 @@ def get_puell_multiple() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Obtención de datos — CoinGecko (MVRV Z-Score aproximado)
+# Obtención de datos — BGeometrics (JSONs públicos)
 # ---------------------------------------------------------------------------
+
+def _fetch_bg(filename: str) -> list:
+    """Descarga un JSON de bgeometrics y devuelve la lista [[ts_ms, value], ...]."""
+    url = f"{BGEOMETRICS_BASE}/{filename}"
+    log.info("BGeometrics: %s", filename)
+    resp = requests.get(url, timeout=30)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _last_value(data: list) -> tuple:
+    """Devuelve (timestamp_ms, value) del último registro no nulo."""
+    for ts, val in reversed(data):
+        if val is not None:
+            return ts, float(val)
+    raise ValueError("Sin datos válidos")
+
 
 def get_mvrv_zscore() -> dict:
-    """
-    MVRV Z-Score aproximado usando datos de CoinGecko (gratuito, sin API key).
-
-    Usamos los últimos 90 días (límite gratuito sin registro).
-    El Realized Cap se aproxima con la media móvil del market cap.
-    El Z-Score se normaliza con la desviación estándar del período.
-
-    Nota: Es una aproximación de corto plazo, útil como señal direccional.
-    """
-    log.info("Descargando datos históricos de CoinGecko para MVRV Z-Score...")
-
-    # CoinGecko permite hasta 90 días sin API key en el endpoint /market_chart
-    url = f"{COINGECKO_URL}/coins/bitcoin/market_chart"
-    params = {
-        "vs_currency": "usd",
-        "days": "90",
-        "interval": "daily",
+    data     = _fetch_bg("mvrv_zscore_data.json")
+    ts, val  = _last_value(data)
+    date_str = datetime.utcfromtimestamp(ts / 1000).strftime("%d/%m/%Y")
+    return {
+        "value":  val,
+        "date":   date_str,
+        "zone":   _zone_info(val, "mvrv"),
+        "source": "BGeometrics (datos reales)",
     }
-    resp = requests.get(url, params=params, timeout=30)
-    resp.raise_for_status()
-    data = resp.json()
 
-    # Construimos DataFrame con precios y market caps
-    prices      = pd.DataFrame(data["prices"],      columns=["timestamp", "price"])
-    market_caps = pd.DataFrame(data["market_caps"], columns=["timestamp", "market_cap"])
 
-    prices["date"]      = pd.to_datetime(prices["timestamp"],      unit="ms")
-    market_caps["date"] = pd.to_datetime(market_caps["timestamp"], unit="ms")
+def get_nupl() -> dict:
+    data     = _fetch_bg("nupl_data.json")
+    ts, val  = _last_value(data)
+    date_str = datetime.utcfromtimestamp(ts / 1000).strftime("%d/%m/%Y")
 
-    df = prices[["date", "price"]].merge(market_caps[["date", "market_cap"]], on="date")
-    df.set_index("date", inplace=True)
-    df.sort_index(inplace=True)
-    df.dropna(inplace=True)
-
-    # Realized Cap aproximado = media móvil 30 días del market cap
-    df["realized_cap"] = df["market_cap"].rolling(30, min_periods=10).mean()
-    df.dropna(subset=["realized_cap"], inplace=True)
-
-    # Diferencia entre Market Cap y Realized Cap
-    df["diff"] = df["market_cap"] - df["realized_cap"]
-
-    # Z-Score = diff / desviación estándar del período
-    std_dev = float(df["diff"].std())
-    latest  = df.iloc[-1]
-
-    z_score    = float(latest["diff"] / std_dev) if std_dev else 0.0
-    mvrv_ratio = float(latest["market_cap"] / latest["realized_cap"])
-    date_str   = latest.name.strftime("%d/%m/%Y")
+    if val < 0:
+        cycle = "Capitulación"
+    elif val < 0.25:
+        cycle = "Esperanza / Miedo"
+    elif val < 0.50:
+        cycle = "Optimismo"
+    elif val < 0.75:
+        cycle = "Creencia / Negación"
+    else:
+        cycle = "Euforia / Codicia"
 
     return {
-        "value":        z_score,
-        "mvrv_ratio":   mvrv_ratio,
-        "market_cap":   float(latest["market_cap"]),
-        "realized_cap": float(latest["realized_cap"]),
-        "date":         date_str,
-        "zone":         _zone_info(z_score, "mvrv"),
+        "value": val,
+        "cycle": cycle,
+        "date":  date_str,
+        "zone":  _zone_info(val, "nupl"),
+    }
+
+
+def get_sopr() -> dict:
+    data     = _fetch_bg("sopr_7sma.json")
+    ts, val  = _last_value(data)
+    date_str = datetime.utcfromtimestamp(ts / 1000).strftime("%d/%m/%Y")
+    interpretation = (
+        "Vendiendo a pérdidas — posible suelo" if val < 1.0
+        else "Vendiendo en ganancias — presión vendedora"
+    )
+    return {
+        "value":          val,
+        "interpretation": interpretation,
+        "date":           date_str,
+        "zone":           _zone_info(val, "sopr"),
+    }
+
+
+def get_funding_rate() -> dict:
+    data     = _fetch_bg("funding_rate.json")
+    ts, val  = _last_value(data)
+    date_str = datetime.utcfromtimestamp(ts / 1000).strftime("%d/%m/%Y")
+    val_pct  = val * 100  # convertir a %
+    return {
+        "value": val_pct,
+        "date":  date_str,
+        "zone":  _zone_info(val_pct, "funding"),
+    }
+
+
+def get_supply_profit() -> dict:
+    data     = _fetch_bg("profit_loss.json")
+    ts, val  = _last_value(data)
+    date_str = datetime.utcfromtimestamp(ts / 1000).strftime("%d/%m/%Y")
+    return {
+        "value": val,
+        "date":  date_str,
+        "zone":  _zone_info(val, "supply"),
+    }
+
+
+def get_sth_realized_price() -> dict:
+    data     = _fetch_bg("sth_realized_price.json")
+    ts, val  = _last_value(data)
+    date_str = datetime.utcfromtimestamp(ts / 1000).strftime("%d/%m/%Y")
+    return {"value": val, "date": date_str}
+
+
+def get_btc_price() -> float:
+    data = _fetch_bg("mvrv_zscore_btc_price.json")
+    _, val = _last_value(data)
+    return val
+
+
+# ---------------------------------------------------------------------------
+# Puntuación compuesta (0-10)
+# ---------------------------------------------------------------------------
+
+def compute_score(puell: dict, mvrv: dict, nupl: dict,
+                  sopr: dict, funding: dict, supply: dict) -> dict:
+    """
+    Suma puntuaciones por zona de cada métrica.
+    Escala: COMPRA FUERTE=+2 … VENTA FUERTE=-2
+    Rango total: -12 a +12  →  normalizado a 0-10
+    """
+    metrics = [
+        ("Puell Multiple",   puell["zone"]["label"]),
+        ("MVRV Z-Score",     mvrv["zone"]["label"]),
+        ("NUPL",             nupl["zone"]["label"]),
+        ("SOPR 7SMA",        sopr["zone"]["label"]),
+        ("Funding Rate",     funding["zone"]["label"]),
+        ("Supply en Profit", supply["zone"]["label"]),
+    ]
+    raw   = sum(ZONE_SCORE.get(label, 0) for _, label in metrics)
+    score = round((raw + 12) / 24 * 10, 1)
+
+    if score >= 8.0:
+        level, color, emoji = "OPORTUNIDAD EXCEPCIONAL", "#1a6e3f", "💚"
+    elif score >= 6.5:
+        level, color, emoji = "ZONA DE COMPRA",          "#2e7d32", "🟢"
+    elif score >= 4.5:
+        level, color, emoji = "NEUTRAL",                 "#616161", "⚪"
+    elif score >= 3.0:
+        level, color, emoji = "PRECAUCIÓN",              "#e65100", "🟠"
+    else:
+        level, color, emoji = "ZONA DE VENTA",           "#b71c1c", "🔴"
+
+    return {
+        "score":   score,
+        "level":   level,
+        "color":   color,
+        "emoji":   emoji,
+        "details": metrics,
+        "raw":     raw,
     }
 
 
 # ---------------------------------------------------------------------------
-# Lógica de señales
+# Lógica de envío
 # ---------------------------------------------------------------------------
 
-def evaluate_signals(puell: dict, mvrv: dict) -> dict:
-    """Determina la señal global y el resumen del análisis."""
-    buy_signals  = 0
-    sell_signals = 0
-
-    for zone_label in [puell["zone"]["label"], mvrv["zone"]["label"]]:
-        if "COMPRA" in zone_label or "Acumulación" in zone_label or "Alcista" in zone_label:
-            buy_signals += 1
-        elif "VENTA" in zone_label or "Precaución" in zone_label:
-            sell_signals += 1
-
-    if buy_signals == 2:
-        signal = "COMPRA"
-        signal_emoji = "💚"
-        signal_color = "#1a6e3f"
-    elif sell_signals == 2:
-        signal = "VENTA"
-        signal_emoji = "🔴"
-        signal_color = "#b71c1c"
-    elif buy_signals == 1 and sell_signals == 0:
-        signal = "TENDENCIA ALCISTA"
-        signal_emoji = "🟢"
-        signal_color = "#2e7d32"
-    elif sell_signals == 1 and buy_signals == 0:
-        signal = "PRECAUCIÓN"
-        signal_emoji = "🟠"
-        signal_color = "#e65100"
-    else:
-        signal = "NEUTRAL"
-        signal_emoji = "⚪"
-        signal_color = "#616161"
-
-    return {"signal": signal, "emoji": signal_emoji, "color": signal_color}
-
-
-def should_send_email(signal_info: dict) -> bool:
-    """Decide si se envía el email según EMAIL_MODE."""
+def should_send_email(score_info: dict, puell: dict) -> bool:
     mode = os.getenv("EMAIL_MODE", "SIGNAL").upper()
     if mode == "ALWAYS":
         return True
-    return signal_info["signal"] in ("COMPRA", "VENTA")
+    return (
+        score_info["score"] >= 6.5
+        or puell["zone"]["label"] == "VENTA FUERTE"
+        or puell["zone"]["label"] == "COMPRA FUERTE"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -259,128 +346,295 @@ def _fmt_usd(value: float) -> str:
     return f"${value:,.0f}"
 
 
-def build_email(puell: dict, mvrv: dict, signal_info: dict) -> tuple:
-    """Devuelve (asunto, cuerpo HTML) del email."""
+def _score_bar(score: float, color: str) -> str:
+    pct = int(score / 10 * 100)
+    return f"""
+    <div style="background:#e0e0e0;border-radius:8px;height:18px;width:100%;margin:8px 0 4px;">
+      <div style="background:{color};height:18px;border-radius:8px;width:{pct}%;"></div>
+    </div>
+    <div style="display:flex;justify-content:space-between;font-size:11px;color:#888;">
+      <span>0 — Venta</span><span>5 — Neutral</span><span>10 — Compra</span>
+    </div>"""
+
+
+def _puell_alert_banner(puell: dict) -> str:
+    """Banner prominente cuando Puell está en zona extrema (compra O venta)."""
+    label = puell["zone"]["label"]
+    if label == "VENTA FUERTE":
+        return f"""
+    <div style="background:#b71c1c;border:3px solid #ff1744;border-radius:10px;
+                padding:20px 28px;margin-bottom:20px;text-align:center;">
+      <div style="font-size:20px;font-weight:900;color:#fff;letter-spacing:1px;">
+        ⚠️&nbsp; ALERTA PUELL MULTIPLE — VENTA FUERTE &nbsp;⚠️
+      </div>
+      <div style="color:#ffcdd2;font-size:14px;margin-top:8px;">
+        Puell = <strong style="color:#fff">{puell['value']:.3f}</strong> —
+        Zona histórica de techo de ciclo.<br>
+        El Puell Multiple en esta zona ha marcado los máximos de todos los ciclos anteriores.
+        <strong style="color:#fff">Señal de alta fiabilidad.</strong>
+      </div>
+    </div>"""
+    elif label == "COMPRA FUERTE":
+        return f"""
+    <div style="background:#1a6e3f;border:3px solid #00e676;border-radius:10px;
+                padding:20px 28px;margin-bottom:20px;text-align:center;">
+      <div style="font-size:20px;font-weight:900;color:#fff;letter-spacing:1px;">
+        💚&nbsp; SEÑAL PUELL MULTIPLE — COMPRA FUERTE &nbsp;💚
+      </div>
+      <div style="color:#c8e6c9;font-size:14px;margin-top:8px;">
+        Puell = <strong style="color:#fff">{puell['value']:.3f}</strong> —
+        Zona histórica de suelo de ciclo.<br>
+        El Puell Multiple en esta zona ha marcado los mínimos de todos los ciclos anteriores.
+        <strong style="color:#fff">Señal de alta fiabilidad.</strong>
+      </div>
+    </div>"""
+    return ""
+
+
+def _metric_card(title: str, value_str: str, zone: dict,
+                 detail_rows: list, note: str = "") -> str:
+    rows_html = "".join(
+        f"<tr><td style='padding:3px 10px 3px 0;color:#666;font-size:12px'>{k}</td>"
+        f"<td style='padding:3px 0;font-size:12px;font-weight:600'>{v}</td></tr>"
+        for k, v in detail_rows
+    )
+    note_html = (
+        f"<div style='font-size:11px;color:#888;margin-top:8px;font-style:italic'>{note}</div>"
+        if note else ""
+    )
+    return f"""
+    <div style="background:#fff;border-radius:10px;padding:16px 18px;
+                box-shadow:0 2px 8px rgba(0,0,0,.06);">
+      <div style="font-size:13px;font-weight:700;color:#1a2f5a;margin-bottom:6px">{title}</div>
+      <div style="font-size:26px;font-weight:800;color:{zone['color']};
+                  margin-bottom:4px;line-height:1.1">{value_str}</div>
+      <div style="display:inline-block;background:{zone['color']};color:#fff;
+                  border-radius:14px;padding:2px 10px;font-size:11px;
+                  font-weight:700;margin-bottom:8px">
+        {zone['emoji']} {zone['label']}
+      </div>
+      <table style="border-collapse:collapse;width:100%">{rows_html}</table>
+      {note_html}
+    </div>"""
+
+
+def _zone_guide(metric_key: str) -> str:
+    rows = ""
+    for low, high, label, color, emoji in ZONES[metric_key]:
+        hi_str = "∞"  if high >= 999  else str(high)
+        lo_str = "-∞" if low  <= -999 else str(low)
+        rows += (
+            f"<tr><td style='padding:2px 6px;font-size:10px;color:#666'>{lo_str}→{hi_str}</td>"
+            f"<td style='padding:2px 4px'>"
+            f"<span style='background:{color};color:#fff;border-radius:6px;"
+            f"padding:1px 7px;font-size:10px'>{emoji} {label}</span></td></tr>"
+        )
+    return f"<table style='border-collapse:collapse'>{rows}</table>"
+
+
+def build_email(puell: dict, mvrv: dict, nupl: dict, sopr: dict,
+                funding: dict, supply: dict, sth: dict,
+                btc_price: float, score_info: dict) -> tuple:
+
     now      = datetime.now().strftime("%d/%m/%Y %H:%M")
-    subject  = (
-        f"[Bitcoin] {signal_info['emoji']} {signal_info['signal']} — "
-        f"Puell {puell['value']:.2f} | MVRV Z {mvrv['value']:.2f} — {now}"
+    sth_val  = sth["value"]
+    sth_diff = (btc_price - sth_val) / sth_val * 100
+    if btc_price < sth_val:
+        sth_signal = f"BTC BAJO el coste medio reciente ({sth_diff:.1f}%) — zona de acumulación"
+        sth_color  = "#00e676"
+    else:
+        sth_signal = f"BTC sobre el coste medio reciente (+{sth_diff:.1f}%)"
+        sth_color  = "#a0b0cc"
+
+    subject = (
+        f"[Bitcoin] {score_info['emoji']} {score_info['level']} "
+        f"({score_info['score']:.1f}/10) — "
+        f"Puell {puell['value']:.2f} | MVRV {mvrv['value']:.2f} | "
+        f"NUPL {nupl['value']:.2f} — {now}"
     )
 
-    def metric_card(title, value_str, zone, detail_rows, ref_url):
-        rows_html = "".join(
-            f"<tr><td style='padding:4px 12px 4px 0;color:#666;font-size:13px'>{k}</td>"
-            f"<td style='padding:4px 0;font-size:13px;font-weight:600'>{v}</td></tr>"
-            for k, v in detail_rows
-        )
-        return f"""
-        <div style="background:#fff;border-radius:10px;padding:20px 24px;
-                    margin-bottom:20px;box-shadow:0 2px 8px rgba(0,0,0,.06);">
-          <div style="display:flex;justify-content:space-between;align-items:center;
-                      flex-wrap:wrap;gap:8px;margin-bottom:14px;">
-            <span style="font-size:16px;font-weight:700;color:#1a2f5a">{title}</span>
-            <a href="{ref_url}" style="font-size:12px;color:#1a2f5a;text-decoration:none;">
-              Ver gráfico ↗
-            </a>
-          </div>
-          <div style="font-size:36px;font-weight:800;color:{zone['color']};
-                      margin-bottom:6px;">{value_str}</div>
-          <div style="display:inline-block;background:{zone['color']};color:#fff;
-                      border-radius:20px;padding:4px 14px;font-size:13px;
-                      font-weight:700;margin-bottom:14px;">
-            {zone['emoji']} {zone['label']}
-          </div>
-          <table style="border-collapse:collapse;width:100%">{rows_html}</table>
-        </div>"""
+    puell_banner = _puell_alert_banner(puell)
 
-    puell_card = metric_card(
-        "Puell Multiple",
+    card_puell = _metric_card(
+        "🔶 Puell Multiple",
         f"{puell['value']:.3f}",
         puell["zone"],
         [
-            ("Issuance diaria (USD)", _fmt_usd(puell["issuance"])),
-            ("Media móvil 365d (USD)", _fmt_usd(puell["ma365"])),
-            ("Dato de", puell["date"]),
+            ("Issuance diaria",  _fmt_usd(puell["issuance"])),
+            ("Media móvil 365d", _fmt_usd(puell["ma365"])),
+            ("Dato de",          puell["date"]),
         ],
-        "https://www.bitcoinmagazinepro.com/es/charts/puell-multiple/",
+        "El más fiable para identificar techos (&gt;4) y suelos (&lt;0.5) de ciclo.",
     )
 
-    mvrv_card = metric_card(
+    card_mvrv = _metric_card(
         "MVRV Z-Score",
         f"{mvrv['value']:.3f}",
         mvrv["zone"],
-        [
-            ("Market Cap", _fmt_usd(mvrv["market_cap"])),
-            ("Realized Cap (aprox.)", _fmt_usd(mvrv["realized_cap"])),
-            ("Ratio MVRV", f"{mvrv['mvrv_ratio']:.2f}x"),
-            ("Dato de", mvrv["date"]),
-            ("Fuente", "CoinGecko (aproximación)"),
-        ],
-        "https://www.bitcoinmagazinepro.com/es/charts/mvrv-zscore/",
+        [("Dato de", mvrv["date"])],
+        "Mide si el precio está muy por encima o debajo de su valor justo histórico.",
     )
 
-    def zone_table(metric_key):
-        rows = ""
-        for low, high, label, color, emoji in ZONES[metric_key]:
-            hi_str = "∞" if high >= 999 else str(high)
-            lo_str = "-∞" if low <= -999 else str(low)
-            rows += (
-                f"<tr><td style='padding:4px 8px;font-size:12px;color:#555'>"
-                f"{lo_str} → {hi_str}</td>"
-                f"<td style='padding:4px 8px'>"
-                f"<span style='background:{color};color:#fff;border-radius:10px;"
-                f"padding:2px 10px;font-size:12px'>{emoji} {label}</span></td></tr>"
-            )
-        return f"<table style='border-collapse:collapse'>{rows}</table>"
+    card_nupl = _metric_card(
+        "NUPL",
+        f"{nupl['value']:.3f}",
+        nupl["zone"],
+        [("Fase del ciclo", nupl["cycle"]), ("Dato de", nupl["date"])],
+        "Ganancia/pérdida latente agregada del mercado. &lt;0 = capitulación.",
+    )
+
+    card_sopr = _metric_card(
+        "SOPR (7 SMA)",
+        f"{sopr['value']:.4f}",
+        sopr["zone"],
+        [("Lectura", sopr["interpretation"]), ("Dato de", sopr["date"])],
+        "&lt;1 = el mercado vende a pérdidas. Señal de capitulación / posible suelo.",
+    )
+
+    card_funding = _metric_card(
+        "Funding Rate",
+        f"{funding['value']:.4f}%",
+        funding["zone"],
+        [("Dato de", funding["date"])],
+        "Negativo = posiciones cortas dominan los futuros. Señal alcista.",
+    )
+
+    card_supply = _metric_card(
+        "% Supply en Ganancias",
+        f"{supply['value']:.1f}%",
+        supply["zone"],
+        [("Dato de", supply["date"])],
+        "&lt;50% = mayoría de BTC en pérdidas. Zona histórica de capitulación.",
+    )
+
+    # Detalle del score
+    score_rows = "".join(
+        f"<tr>"
+        f"<td style='padding:3px 10px 3px 0;font-size:12px;color:#555'>{name}</td>"
+        f"<td style='padding:3px 8px 3px 0;font-size:12px;font-weight:700;"
+        f"color:{'#1a6e3f' if ZONE_SCORE.get(label,0)>0 else '#b71c1c' if ZONE_SCORE.get(label,0)<0 else '#616161'}'>"
+        f"{'+' if ZONE_SCORE.get(label,0)>0 else ''}{ZONE_SCORE.get(label,0)}</td>"
+        f"<td style='padding:3px 0;font-size:12px;color:#333'>{label}</td>"
+        f"</tr>"
+        for name, label in score_info["details"]
+    )
+
+    guides_html = "".join(
+        f"""<div>
+          <div style="font-size:11px;font-weight:700;color:#555;margin-bottom:4px">{name}</div>
+          {_zone_guide(key)}
+        </div>"""
+        for name, key in [
+            ("Puell Multiple", "puell"),
+            ("MVRV Z-Score",   "mvrv"),
+            ("NUPL",           "nupl"),
+            ("SOPR 7SMA",      "sopr"),
+            ("Funding Rate",   "funding"),
+            ("Supply Profit",  "supply"),
+        ]
+    )
 
     html = f"""<!DOCTYPE html>
-<html lang="es"><head><meta charset="utf-8"></head>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+</head>
 <body style="margin:0;padding:0;background:#f0f2f5;font-family:Arial,sans-serif;">
-<div style="max-width:600px;margin:30px auto;padding:0 16px;">
+<div style="max-width:640px;margin:30px auto;padding:0 12px;">
 
+  <!-- CABECERA -->
   <div style="background:linear-gradient(135deg,#1a2f5a,#243d73);
-              border-radius:12px 12px 0 0;padding:28px 32px;text-align:center;">
-    <div style="font-size:28px;font-weight:800;color:#c9a84c;
-                letter-spacing:1px;">₿ Bitcoin Metrics</div>
-    <div style="color:#a0b0cc;font-size:13px;margin-top:6px;">{now}</div>
-  </div>
-
-  <div style="background:{signal_info['color']};padding:18px 32px;text-align:center;">
-    <div style="font-size:22px;font-weight:800;color:#fff;letter-spacing:1px;">
-      {signal_info['emoji']}  SEÑAL GLOBAL: {signal_info['signal']}
+              border-radius:12px 12px 0 0;padding:24px 28px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;
+                flex-wrap:wrap;gap:8px;">
+      <div style="font-size:24px;font-weight:800;color:#c9a84c;letter-spacing:1px;">
+        ₿ Bitcoin Metrics
+      </div>
+      <div style="text-align:right">
+        <div style="color:#fff;font-size:24px;font-weight:700">{_fmt_usd(btc_price)}</div>
+        <div style="color:#a0b0cc;font-size:11px">{now}</div>
+      </div>
+    </div>
+    <div style="margin-top:12px;padding:10px 14px;background:rgba(255,255,255,.09);
+                border-radius:8px;font-size:12px;color:{sth_color};">
+      <strong>STH Realized Price:</strong> {_fmt_usd(sth_val)}
+      &nbsp;·&nbsp; {sth_signal}
     </div>
   </div>
 
-  <div style="background:#f8f7f4;padding:24px 24px 16px;">
-    {puell_card}
-    {mvrv_card}
+  <div style="background:#f8f7f4;padding:20px 16px 24px;">
 
+    <!-- BANNER PUELL (solo zona extrema) -->
+    {puell_banner}
+
+    <!-- PUNTUACIÓN COMPUESTA -->
     <div style="background:#fff;border-radius:10px;padding:20px 24px;
-                box-shadow:0 2px 8px rgba(0,0,0,.06);">
-      <div style="font-size:14px;font-weight:700;color:#1a2f5a;margin-bottom:12px;">
+                margin-bottom:18px;box-shadow:0 2px 8px rgba(0,0,0,.06);">
+      <div style="display:flex;justify-content:space-between;align-items:center;
+                  flex-wrap:wrap;gap:8px;margin-bottom:4px;">
+        <div>
+          <div style="font-size:12px;color:#888;margin-bottom:2px">
+            Puntuación de Oportunidad
+          </div>
+          <div style="font-size:34px;font-weight:900;color:{score_info['color']};line-height:1">
+            {score_info['score']:.1f}
+            <span style="font-size:16px;color:#bbb;font-weight:400">/ 10</span>
+          </div>
+        </div>
+        <div style="background:{score_info['color']};color:#fff;border-radius:24px;
+                    padding:10px 20px;font-size:15px;font-weight:800;text-align:center;">
+          {score_info['emoji']}&nbsp; {score_info['level']}
+        </div>
+      </div>
+      {_score_bar(score_info['score'], score_info['color'])}
+      <table style="border-collapse:collapse;width:100%;margin-top:12px;">
+        <tr>
+          <th style="text-align:left;font-size:11px;color:#aaa;padding-bottom:4px">Métrica</th>
+          <th style="text-align:left;font-size:11px;color:#aaa;padding-bottom:4px">Pts</th>
+          <th style="text-align:left;font-size:11px;color:#aaa;padding-bottom:4px">Zona</th>
+        </tr>
+        {score_rows}
+      </table>
+    </div>
+
+    <!-- GRID DE MÉTRICAS (2 columnas) -->
+    <table style="width:100%;border-collapse:separate;border-spacing:10px;">
+      <tr>
+        <td style="width:50%;vertical-align:top;padding:0">{card_puell}</td>
+        <td style="width:50%;vertical-align:top;padding:0">{card_mvrv}</td>
+      </tr>
+      <tr>
+        <td style="vertical-align:top;padding:0">{card_nupl}</td>
+        <td style="vertical-align:top;padding:0">{card_sopr}</td>
+      </tr>
+      <tr>
+        <td style="vertical-align:top;padding:0">{card_funding}</td>
+        <td style="vertical-align:top;padding:0">{card_supply}</td>
+      </tr>
+    </table>
+
+    <!-- GUÍA DE ZONAS -->
+    <div style="background:#fff;border-radius:10px;padding:18px 20px;
+                box-shadow:0 2px 8px rgba(0,0,0,.06);margin-top:10px;">
+      <div style="font-size:12px;font-weight:700;color:#1a2f5a;margin-bottom:12px;">
         Guía de interpretación
       </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
-        <div>
-          <div style="font-size:12px;font-weight:700;color:#555;margin-bottom:6px;">Puell Multiple</div>
-          {zone_table("puell")}
-        </div>
-        <div>
-          <div style="font-size:12px;font-weight:700;color:#555;margin-bottom:6px;">MVRV Z-Score</div>
-          {zone_table("mvrv")}
-        </div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;">
+        {guides_html}
       </div>
     </div>
+
   </div>
 
+  <!-- PIE -->
   <div style="background:#1a2f5a;border-radius:0 0 12px 12px;
-              padding:16px 24px;text-align:center;">
-    <div style="font-size:11px;color:#7a8faa;line-height:1.7">
-      Datos: <a href="https://coinmetrics.io" style="color:#c9a84c;">CoinMetrics</a> (Puell) ·
-      <a href="https://coingecko.com" style="color:#c9a84c;">CoinGecko</a> (MVRV aprox.) ·
-      Referencia: <a href="https://www.bitcoinmagazinepro.com/es/charts/puell-multiple/"
-         style="color:#c9a84c;">Bitcoin Magazine Pro</a><br>
-      Este análisis es meramente informativo. No constituye asesoramiento financiero.
+              padding:14px 20px;text-align:center;">
+    <div style="font-size:11px;color:#7a8faa;line-height:1.8">
+      Puell: <a href="https://community-api.coinmetrics.io" style="color:#c9a84c">CoinMetrics</a>
+      &nbsp;·&nbsp;
+      Resto: <a href="https://charts.bgeometrics.com" style="color:#c9a84c">BGeometrics</a>
+      &nbsp;·&nbsp;
+      Ref: <a href="https://alfabitcoin.io/indicadores-premium" style="color:#c9a84c">AlfaBitcoin</a><br>
+      Análisis meramente informativo. No constituye asesoramiento financiero.
     </div>
   </div>
 
@@ -437,42 +691,57 @@ def send_email(subject: str, html_body: str) -> bool:
 def run_check():
     log.info("=== Iniciando revisión de métricas Bitcoin ===")
     try:
-        puell = get_puell_multiple()
-        log.info("Puell Multiple: %.3f  [%s]", puell["value"], puell["zone"]["label"])
+        puell   = get_puell_multiple()
+        mvrv    = get_mvrv_zscore()
+        nupl    = get_nupl()
+        sopr    = get_sopr()
+        funding = get_funding_rate()
+        supply  = get_supply_profit()
+        sth     = get_sth_realized_price()
+        price   = get_btc_price()
 
-        mvrv = get_mvrv_zscore()
-        log.info("MVRV Z-Score : %.3f  [%s]", mvrv["value"], mvrv["zone"]["label"])
+        score_info = compute_score(puell, mvrv, nupl, sopr, funding, supply)
 
-        signal_info = evaluate_signals(puell, mvrv)
-        log.info("Señal global  : %s %s", signal_info["emoji"], signal_info["signal"])
+        log.info("BTC Price     : %s",      _fmt_usd(price))
+        log.info("STH Realizado : %s",      _fmt_usd(sth["value"]))
+        log.info("Puell Multiple: %.3f  [%s]",  puell["value"],    puell["zone"]["label"])
+        log.info("MVRV Z-Score  : %.3f  [%s]",  mvrv["value"],     mvrv["zone"]["label"])
+        log.info("NUPL          : %.3f  [%s]",  nupl["value"],     nupl["zone"]["label"])
+        log.info("SOPR 7SMA     : %.4f  [%s]",  sopr["value"],     sopr["zone"]["label"])
+        log.info("Funding Rate  : %.4f%% [%s]", funding["value"],  funding["zone"]["label"])
+        log.info("Supply Profit : %.1f%%  [%s]", supply["value"],  supply["zone"]["label"])
+        log.info("Score         : %.1f/10  → %s", score_info["score"], score_info["level"])
 
-        if should_send_email(signal_info):
-            subject, html = build_email(puell, mvrv, signal_info)
+        if should_send_email(score_info, puell):
+            subject, html = build_email(
+                puell, mvrv, nupl, sopr, funding, supply, sth, price, score_info
+            )
             send_email(subject, html)
         else:
             log.info(
-                "Sin señal activa (%s). Email no enviado. "
-                "Cambia EMAIL_MODE=ALWAYS para recibir siempre el informe.",
-                signal_info["signal"],
+                "Score %.1f (%s) — sin señal activa. "
+                "Usa EMAIL_MODE=ALWAYS para recibir siempre el informe.",
+                score_info["score"], score_info["level"],
             )
+
     except requests.exceptions.RequestException as exc:
-        log.error("Error de red al consultar la API: %s", exc)
+        log.error("Error de red: %s", exc)
     except Exception as exc:
         log.exception("Error inesperado: %s", exc)
     log.info("=== Revisión completada ===\n")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Bitcoin Metrics Alert Bot")
+    parser = argparse.ArgumentParser(description="Bitcoin Metrics Alert Bot v2")
     parser.add_argument("--daemon", action="store_true",
-                        help="Ejecutar en modo demonio (comprueba diariamente a las 08:00)")
-    parser.add_argument("--hour", type=int, default=8,
-                        help="Hora de ejecución diaria en modo demonio (por defecto: 8)")
+                        help="Ejecutar en modo demonio (comprueba diariamente a la hora indicada)")
+    parser.add_argument("--time", type=str, default="07:30",
+                        help="Hora de ejecución diaria en modo demonio, formato HH:MM (por defecto: 07:30)")
     args = parser.parse_args()
 
     if args.daemon:
-        time_str = f"{args.hour:02d}:00"
-        log.info("Modo demonio activo. Revisión diaria a las %s.", time_str)
+        time_str = args.time
+        log.info("Modo demonio activo. Revisión diaria a las %s (hora local).", time_str)
         run_check()
         schedule.every().day.at(time_str).do(run_check)
         while True:

@@ -1,0 +1,20 @@
+# Credenciales — NUNCA subir al repo
+.env
+Env/
+
+# Scripts de exploración (uso interno, no necesarios en GitHub)
+explorar_alfabitcoin.py
+explorar_metricas.py
+buscar_urls.py
+descubrir_jsons.py
+inspect_widgets.py
+
+# Logs
+*.log
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc

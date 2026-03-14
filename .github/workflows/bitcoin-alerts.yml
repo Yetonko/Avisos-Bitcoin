@@ -2,7 +2,7 @@ name: Bitcoin Alerts Diario
 
 on:
   schedule:
-    - cron: '0 7 * * *'
+    - cron: '30 6 * * *'  # 07:30 hora España (CET/UTC+1)
   workflow_dispatch:
 
 jobs:
